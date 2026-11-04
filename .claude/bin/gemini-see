@@ -47,7 +47,7 @@ def call(parts, tools=None):
                 if e.code in (500, 503) and attempt < 2:
                     time.sleep(2 ** (attempt + 1)); continue
                 break
-        if d is not None or "HTTP 429" in err: break
+        if d is not None: break
     if d is None:
         if "HTTP 429" in err and tools and "google_search" in json.dumps(tools):
             err += "\n(Google Search grounding needs a billing-enabled Gemini API project.)"
