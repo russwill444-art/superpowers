@@ -5,9 +5,17 @@
   gemini-see page   URL [URL...] -q "..." read/extract from pages, blogs, sites
   gemini-see video  YOUTUBE_URL  -q "..." watch a YouTube video (visuals + audio)
 
-Key: $GEMINI_API_KEY, else ~/.config/gemini/env. Model: $GEMINI_MODEL (default gemini-3.8-flash).
+Key: $GEMINI_API_KEY, else ~/.config/gemini/env. Models: $GEMINI_MODEL, comma-separated fallback list (default gemini-3.8-flash,gemini-3.5-flash).
 """
-import argparse, json, os, sys, urllib.request, urllib.error
+import argparse, html, json, os, re, sys, time, urllib.request, urllib.error
+
+def fetch_text(url, limit=200_000):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (gemini-see)"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        raw = r.read(5_000_000).decode(r.headers.get_content_charset() or "utf-8", "replace")
+    raw = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", raw)
+    text = html.unescape(re.sub(r"(?s)<[^>]+>", " ", raw))
+    return re.sub(r"\s+", " ", text).strip()[:limit]
 
 def key():
     k = os.environ.get("GEMINI_API_KEY")
@@ -19,18 +27,31 @@ def key():
     except OSError: pass
     sys.exit("No GEMINI_API_KEY set and ~/.config/gemini/env missing")
 
+MODELS = [m for m in os.environ.get("GEMINI_MODEL", "gemini-3.8-flash,gemini-3.5-flash").split(",") if m]
+
 def call(parts, tools=None):
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
     body = {"contents": [{"parts": parts}]}
     if tools: body["tools"] = tools
-    req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(body).encode(), method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": key()})
-    try:
-        with urllib.request.urlopen(req, timeout=600) as r: d = json.load(r)
-    except urllib.error.HTTPError as e:
-        sys.exit(f"HTTP {e.code}: {e.read().decode()[:2000]}")
+    d, err = None, ""
+    for model in MODELS:  # on overload / unavailable model, fall through to the next one
+        req = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            data=json.dumps(body).encode(), method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": key()})
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=300) as r: d = json.load(r)
+                break
+            except urllib.error.HTTPError as e:
+                err = f"{model}: HTTP {e.code}: {e.read().decode()[:1500]}"
+                if e.code in (500, 503) and attempt < 2:
+                    time.sleep(2 ** (attempt + 1)); continue
+                break
+        if d is not None or "HTTP 429" in err: break
+    if d is None:
+        if "HTTP 429" in err and tools and "google_search" in json.dumps(tools):
+            err += "\n(Google Search grounding needs a billing-enabled Gemini API project.)"
+        sys.exit(err)
     c = (d.get("candidates") or [{}])[0]
     print("".join(p.get("text", "") for p in c.get("content", {}).get("parts", [])) or json.dumps(d)[:2000])
     srcs = [ch["web"] for ch in c.get("groundingMetadata", {}).get("groundingChunks", []) if "web" in ch]
@@ -51,7 +72,13 @@ def main():
     if a.cmd == "web":
         call([{"text": a.question}], [{"google_search": {}}])
     elif a.cmd == "page":
-        call([{"text": a.q + "\n\nURLs:\n" + "\n".join(a.urls)}], [{"url_context": {}}, {"google_search": {}}])
+        docs, remote = [], []
+        for u in a.urls:
+            try: docs.append(f"=== {u} ===\n{fetch_text(u)}")
+            except Exception: remote.append(u)  # blocked locally: let Gemini fetch it
+        text = a.q + "\n\n" + "\n\n".join(docs)
+        if remote: text += "\n\nAlso read these URLs:\n" + "\n".join(remote)
+        call([{"text": text}], [{"url_context": {}}] if remote else None)
     else:
         call([{"file_data": {"file_uri": a.url}}, {"text": a.q}])
 
