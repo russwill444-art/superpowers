@@ -23,6 +23,12 @@ for skill in "$repo"/skills/*/; do
   ln -sfn "${skill%/}" "$target"
 done
 
+# Put repo tools (gemini-see) on PATH. The Gemini key comes from the
+# GEMINI_API_KEY environment variable set in the cloud environment settings.
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  echo "export PATH=\"$repo/.claude/bin:\$PATH\"" >> "$CLAUDE_ENV_FILE"
+fi
+
 # Emit the plugin's bootstrap context (using-superpowers) so skills
 # auto-trigger. This is the hook's only stdout.
 CLAUDE_PLUGIN_ROOT="$repo" "$repo/hooks/session-start"
